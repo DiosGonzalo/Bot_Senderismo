@@ -1,52 +1,14 @@
-"""Key changes and fixes:
-
-Fixed NameError: Replaced CallbackContext with ContextTypes.DEFAULT_TYPE and added async to all handler functions to match the latest python-telegram-bot API (v20+).
-SQLite3 Database: Replaced JSON storage with SQLite3, creating two tables:
-users: Stores user_id, pin, and paid status
-passwords: Stores encrypted passwords linked to users
-PayPal Integration:
-Added paypalrestsdk for real payment processing
-Implemented /pay command that creates a PayPal payment
-Added /verify command to confirm payment completion
-You'll need to:
-Install paypalrestsdk (pip install paypalrestsdk)
-Get PayPal API credentials (client_id and client_secret) from PayPal Developer
-Set up proper return URLs (replace the localhost URLs)
-Change "sandbox" to "live" for production
-Additional Requirements:
-Replace "YOUR_TELEGRAM_TOKEN" with your BotFather token
-Replace "YOUR_PAYPAL_CLIENT_ID" and "YOUR_PAYPAL_CLIENT_SECRET" with your PayPal credentials
-To use this:
-
-Install required packages:
-bash
-Ajuste
-Copiar
-pip install python-telegram-bot cryptography paypalrestsdk sqlite3
-Set up your PayPal developer account and get API credentials
-Update the token and PayPal credentials in the code
-Set up a webhook or local server for payment verification URLs
-Run the script
-The bot now uses a proper database and real PayPal payments instead of simulated ones. Users will need
- to complete the payment through PayPal and then use /verify to confirm their payment status."""
-
-import json
 import os
 import random
 import string
 import sqlite3
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
-from telegram.ext import ContextTypes  # Replaced CallbackContext with ContextTypes
+from telegram.ext import ContextTypes
 from cryptography.fernet import Fernet
-import paypalrestsdk
 
-# Configure PayPal SDK
-paypalrestsdk.configure({
-    "mode": "sandbox",  # Change to "live" for production
-    "client_id": "YOUR_PAYPAL_CLIENT_ID",
-    "client_secret": "YOUR_PAYPAL_CLIENT_SECRET"
-})
+# Token de Telegram (¡REEMPLAZA ESTO CON TU TOKEN REAL DE BOTFATHER!)
+TOKEN = "7741007189:AAHfPIhltYVu22WmdubIBjXXknI_2u9lgs0"
 
 # Estados para la conversación
 PIN, OPTION, SAVE_PASSWORD, VIEW_PASSWORD, GENERATE_PASSWORD = range(5)
@@ -55,7 +17,7 @@ PIN, OPTION, SAVE_PASSWORD, VIEW_PASSWORD, GENERATE_PASSWORD = range(5)
 DB_FILE = "passwords.db"
 KEY_FILE = "secret.key"
 
-# Generate encryption key if it doesn't exist
+# Generar clave de cifrado si no existe
 if not os.path.exists(KEY_FILE):
     key = Fernet.generate_key()
     with open(KEY_FILE, "wb") as key_file:
@@ -63,7 +25,7 @@ if not os.path.exists(KEY_FILE):
 with open(KEY_FILE, "rb") as key_file:
     CIPHER = Fernet(key_file.read())
 
-# Initialize SQLite database
+# Inicializar base de datos SQLite
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -75,7 +37,21 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Menú principal
+# Función para mostrar el menú
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message="¿Qué desea hacer?"):
+    keyboard = [
+        [InlineKeyboardButton("Guardar contraseña", callback_data="save")],
+        [InlineKeyboardButton("Ver contraseñas", callback_data="view")],
+        [InlineKeyboardButton("Generar contraseña", callback_data="generate")],
+        [InlineKeyboardButton("Info", callback_data="info")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    if update.callback_query:
+        await update.callback_query.edit_message_text(message, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(message, reply_markup=reply_markup)
+
+# Comando /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = str(update.message.from_user.id)
     conn = sqlite3.connect(DB_FILE)
@@ -83,21 +59,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     
     c.execute("SELECT pin FROM users WHERE user_id = ?", (user_id,))
     result = c.fetchone()
-    
-    if not result:
-        await update.message.reply_text("Primero, establece un PIN de 4 dígitos para proteger tus contraseñas:")
-        conn.close()
-        return PIN
-
-    keyboard = [
-        [InlineKeyboardButton("Guardar contraseña", callback_data="save")],
-        [InlineKeyboardButton("Ver contraseñas", callback_data="view")],
-        [InlineKeyboardButton("Generar contraseña", callback_data="generate")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("¿Qué desea hacer?", reply_markup=reply_markup)
     conn.close()
-    return OPTION
+
+    if not result:
+        await update.message.reply_text("Bienvenido. Establece un PIN de 4 dígitos para proteger tus contraseñas:")
+        return PIN
+    else:
+        await show_menu(update, context, message="Bienvenido de nuevo. ¿Qué desea hacer?")
+        return OPTION
+
+# Comando /menu
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = str(update.message.from_user.id)
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    c.execute("SELECT pin FROM users WHERE user_id = ?", (user_id,))
+    result = c.fetchone()
+    conn.close()
+
+    if not result:
+        await update.message.reply_text("Primero configura un PIN con /start.")
+        return ConversationHandler.END
+    else:
+        await show_menu(update, context)
+        return OPTION
 
 # Establecer PIN
 async def set_pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -114,7 +100,8 @@ async def set_pin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     conn.commit()
     conn.close()
 
-    await update.message.reply_text("PIN establecido correctamente. Usa /start para comenzar.")
+    await update.message.reply_text("PIN establecido correctamente.")
+    await show_menu(update, context)
     return ConversationHandler.END
 
 # Manejar opciones del menú
@@ -132,6 +119,19 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     elif option == "generate":
         await query.edit_message_text("¿Cuántos caracteres quieres que tenga la contraseña? (8-32)")
         return GENERATE_PASSWORD
+    elif option == "info":
+        info_text = (
+            "💡 *Comandos y cómo funciona:*\n"
+            "- *Guardar contraseña*: Usa 'sitio:contraseña' para guardar una contraseña.\n"
+            "- *Ver contraseñas*: Introduce tu PIN para ver todas tus contraseñas.\n"
+            "- *Generar contraseña*: Elige la longitud y obtén una contraseña segura.\n"
+            "- Usa /menu en cualquier momento para ver las opciones.\n\n"
+            "🔒 *Seguridad*: Tus contraseñas se guardan cifradas con una clave única.\n\n"
+            "💸 *Nota*: Actualmente el límite de 15 contraseñas está desactivado."
+        )
+        await query.edit_message_text(info_text)
+        await show_menu(update, context)
+        return OPTION
 
 # Guardar contraseña
 async def save_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -147,23 +147,19 @@ async def save_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    
-    c.execute("SELECT paid FROM users WHERE user_id = ?", (user_id,))
-    paid = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM passwords WHERE user_id = ?", (user_id,))
-    count = c.fetchone()[0]
-
-    if count >= 15 and not paid:
-        await update.message.reply_text("Has alcanzado el límite de 15 contraseñas. Paga 5€ (usa /pay) para almacenar más.")
-        conn.close()
-        return ConversationHandler.END
-
     c.execute("INSERT INTO passwords (user_id, site, password) VALUES (?, ?, ?)", 
              (user_id, site, encrypted_password))
     conn.commit()
     conn.close()
     
     await update.message.reply_text(f"Contraseña guardada para '{site}'.")
+    # Enviar un nuevo mensaje con el menú en lugar de editar el anterior
+    await update.message.reply_text("¿Qué desea hacer?", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("Guardar contraseña", callback_data="save")],
+        [InlineKeyboardButton("Ver contraseñas", callback_data="view")],
+        [InlineKeyboardButton("Generar contraseña", callback_data="generate")],
+        [InlineKeyboardButton("Info", callback_data="info")],
+    ]))
     return ConversationHandler.END
 
 # Ver contraseñas
@@ -175,7 +171,12 @@ async def view_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     c = conn.cursor()
     
     c.execute("SELECT pin FROM users WHERE user_id = ?", (user_id,))
-    stored_pin = c.fetchone()[0]
+    result = c.fetchone()
+    if not result:
+        await update.message.reply_text("No tienes un PIN configurado. Usa /start para configurarlo.")
+        conn.close()
+        return ConversationHandler.END
+    stored_pin = result[0]
     
     if pin != stored_pin:
         await update.message.reply_text("PIN incorrecto.")
@@ -194,6 +195,14 @@ async def view_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             pwd = CIPHER.decrypt(enc_pwd.encode()).decode()
             response += f"{site}: {pwd}\n"
         await update.message.reply_text(response)
+    
+    # Enviar un nuevo mensaje con el menú
+    await update.message.reply_text("¿Qué desea hacer?", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("Guardar contraseña", callback_data="save")],
+        [InlineKeyboardButton("Ver contraseñas", callback_data="view")],
+        [InlineKeyboardButton("Generar contraseña", callback_data="generate")],
+        [InlineKeyboardButton("Info", callback_data="info")],
+    ]))
     return ConversationHandler.END
 
 # Generar contraseña
@@ -210,63 +219,23 @@ async def generate_password(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     characters = string.ascii_letters + string.digits + string.punctuation
     password = ''.join(random.choice(characters) for _ in range(length))
     await update.message.reply_text(f"Tu nueva contraseña: {password}")
+    
+    # Enviar un nuevo mensaje con el menú
+    await update.message.reply_text("¿Qué desea hacer?", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("Guardar contraseña", callback_data="save")],
+        [InlineKeyboardButton("Ver contraseñas", callback_data="view")],
+        [InlineKeyboardButton("Generar contraseña", callback_data="generate")],
+        [InlineKeyboardButton("Info", callback_data="info")],
+    ]))
     return ConversationHandler.END
-
-# Pago con PayPal
-async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = str(update.message.from_user.id)
-    
-    payment = paypalrestsdk.Payment({
-        "intent": "sale",
-        "payer": {"payment_method": "paypal"},
-        "transactions": [{
-            "amount": {
-                "total": "5.00",
-                "currency": "EUR"
-            },
-            "description": "Acceso ilimitado al bot de contraseñas"
-        }],
-        "redirect_urls": {
-            "return_url": "http://localhost:8000/success",  # Change this to your success URL
-            "cancel_url": "http://localhost:8000/cancel"    # Change this to your cancel URL
-        }
-    })
-
-    if payment.create():
-        for link in payment.links:
-            if link.rel == "approval_url":
-                await update.message.reply_text(f"Por favor, completa el pago aquí: {link.href}")
-                context.user_data['payment_id'] = payment.id
-    else:
-        await update.message.reply_text("Error al crear el pago. Intenta de nuevo.")
-
-# Verificar pago
-async def verify_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = str(update.message.from_user.id)
-    payment_id = context.user_data.get('payment_id')
-    
-    if not payment_id:
-        await update.message.reply_text("No hay pago pendiente.")
-        return
-
-    payment = paypalrestsdk.Payment.find(payment_id)
-    if payment.execute({"payer_id": payment.payer.payer_info.payer_id}):
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("UPDATE users SET paid = 1 WHERE user_id = ?", (user_id,))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text("Pago recibido (5€). Ahora puedes guardar contraseñas ilimitadas.")
-    else:
-        await update.message.reply_text("Error al verificar el pago.")
 
 # Main
 def main():
     init_db()
-    application = Application.builder().token("7741007189:AAHfPIhltYVu22WmdubIBjXXknI_2u9lgs0").build()
+    application = Application.builder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[CommandHandler("start", start), CommandHandler("menu", menu)],
         states={
             PIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_pin)],
             OPTION: [CallbackQueryHandler(button)],
@@ -275,12 +244,10 @@ def main():
             GENERATE_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, generate_password)],
         },
         fallbacks=[],
+        per_message=False
     )
 
     application.add_handler(conv_handler)
-    application.add_handler(CommandHandler("pay", pay))
-    application.add_handler(CommandHandler("verify", verify_payment))
-
     application.run_polling()
 
 if __name__ == "__main__":
